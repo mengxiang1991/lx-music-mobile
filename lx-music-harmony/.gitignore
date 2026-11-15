@@ -1,0 +1,13 @@
+/.hvigor/
+/.hvigor-user/
+/node_modules/
+/entry/build/
+/build-profile.json5
+/local.properties
+/.idea/
+/entry/.preview/
+/oh_modules/
+/entry/oh_modules/
+*.p12
+*.p7b
+*.cer
