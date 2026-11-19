@@ -9,6 +9,7 @@ const INK: string = '#172920';
 const MUTED: string = '#526158';
 const GREEN: string = '#315940';
 const LIME: string = '#C5ED9F';
+const SAMPLE_AUDIO_URL: string = 'https://www.soundhelix.com/examples/mp3/SoundHelix-Song-1.mp3';
 
 @Entry
 @Component
@@ -219,13 +220,13 @@ struct Index {
     }
   }
 
-  private playLink(): void {
-    const link = this.address.trim();
+  private playLink(address: string, name?: string): void {
+    const link = address.trim();
     if (!onlineUrl(link)) {
       this.notice = '请输入以 https:// 或 http:// 开头的音频地址';
       return;
     }
-    const label = link.split(/[?#]/)[0].split('/').pop() || '网络音频';
+    const label = name ?? (link.split(/[?#]/)[0].split('/').pop() || '网络音频');
     this.play([new Track('url:' + link, label, '音频直链', 'url', '', link)], 0);
     this.tab = 2;
   }
@@ -370,8 +371,12 @@ struct Index {
       Column({ space: 14 }) {
         Text('音频直链').fontSize(19).fontWeight(FontWeight.Bold).fontColor(INK)
         TextInput({ placeholder: 'https://…', text: this.address }).backgroundColor('#FCFBF5')
-          .onChange(value => { this.address = value; }).onSubmit(() => this.playLink())
-        Button('播放链接').backgroundColor(GREEN).onClick(() => this.playLink())
+          .onChange(value => { this.address = value; }).onSubmit(() => this.playLink(this.address))
+        Row({ space: 8 }) {
+          Button('播放链接').backgroundColor(GREEN).onClick(() => this.playLink(this.address))
+          Button('播放测试音频').backgroundColor(LIME).fontColor(INK)
+            .onClick(() => this.playLink(SAMPLE_AUDIO_URL, 'SoundHelix Song 1'))
+        }.width('100%')
         Divider().color('#D6DBCE')
         Text('播放地址接口').fontSize(19).fontWeight(FontWeight.Bold).fontColor(INK)
         Text('填写你可用的 HTTPS 接口。用 {id} 表示歌曲 ID，{source} 表示音源。接口应返回音频直链或包含 url 的 JSON。')
