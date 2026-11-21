@@ -1,14 +1,18 @@
 import { media } from '@kit.MediaKit';
 import { fileIo as fs } from '@kit.CoreFileKit';
 import { Track } from './Tracks';
-import { resolveTrack } from './Online';
+import { ResolvedSource } from './ScriptSources';
 
 export interface PlayerEvents {
   state: (state: string) => void;
   time: (position: number, duration: number) => void;
   ended: () => void;
+  resumeFailed: () => void;
+  sourceReady: (source: ResolvedSource) => void;
   error: (message: string) => void;
 }
+
+export type SourceLookup = (alive: () => boolean, excluded: string[]) => Promise<ResolvedSource>;
 
 export class Player {
   private generation = 0;
@@ -16,13 +20,14 @@ export class Player {
   private file?: fs.File;
   private pending: Promise<void> = Promise.resolve();
 
-  start(track: Track, resolver: string, events: PlayerEvents): void {
+  start(track: Track, resolve: SourceLookup, events: PlayerEvents, resumePosition: number = 0, excluded: string[] = []): void {
     const generation = ++this.generation;
     this.pending = this.pending.then(async () => {
       await this.close();
       if (generation !== this.generation) return;
       events.state('正在加载');
-      const address = track.url || await resolveTrack(track, resolver);
+      const source = track.url ? undefined : await resolve(() => generation === this.generation, excluded);
+      const address = source?.url ?? track.url;
       if (generation !== this.generation) return;
       const player = await media.createAVPlayer();
       this.active = player;
@@ -31,12 +36,31 @@ export class Player {
         return;
       }
       const current = (): boolean => generation === this.generation && this.active === player;
-      player.on('error', error => {
-        if (current()) events.error('播放失败（' + error.code + '）');
-      });
-      player.on('timeUpdate', position => {
-        if (current()) events.time(position, player.duration);
-      });
+      let started = false;
+      const fail = (message: string): void => {
+        if (!current()) return;
+        if (!started && source) this.start(track, resolve, events, resumePosition, [...excluded, source.id]);
+        else events.error(message);
+      };
+      player.on('error', error => fail('播放失败（' + error.code + '）'));
+      if (source) {
+        setTimeout(() => {
+          if (!started) fail('音源加载超时');
+        }, 12000);
+      }
+      let resumeTarget: number = 0;
+      let resumeSeeking: boolean = false;
+      const progress = (position: number): void => {
+        if (!current()) return;
+        if (resumeSeeking && Math.abs(resumeTarget - position) > 3000) return;
+        if (resumeSeeking) {
+          resumeSeeking = false;
+          resumeTarget = 0;
+        }
+        events.time(position, player.duration);
+      };
+      player.on('timeUpdate', progress);
+      player.on('seekDone', progress);
       player.on('stateChange', async state => {
         if (!current()) return;
         try {
@@ -45,13 +69,35 @@ export class Player {
               await player.prepare();
               break;
             case 'prepared':
-              events.time(0, player.duration);
+              resumeTarget = resumePosition > 0 && resumePosition < player.duration ? resumePosition : 0;
+              events.time(resumeTarget, player.duration);
               if (current()) await player.play();
               break;
             case 'playing':
+              if (!started && source) events.sourceReady(source);
+              started = true;
+              if (resumeTarget > 0 && !resumeSeeking) {
+                resumeSeeking = true;
+                try {
+                  player.seek(resumeTarget, media.SeekMode.SEEK_PREV_SYNC);
+                  setTimeout(() => {
+                    if (!current() || !resumeSeeking || player.state !== 'playing') return;
+                    events.resumeFailed();
+                    this.start(track, resolve, events);
+                  }, 8000);
+                } catch {
+                  resumeSeeking = false;
+                  resumeTarget = 0;
+                  events.resumeFailed();
+                }
+              }
               events.state('正在播放');
               break;
             case 'paused':
+              if (resumeSeeking) {
+                resumeSeeking = false;
+                resumeTarget = 0;
+              }
               events.state('已暂停');
               break;
             case 'completed':
@@ -60,7 +106,7 @@ export class Player {
               break;
           }
         } catch (error) {
-          if (current()) events.error('播放失败：' + String(error));
+          fail('播放失败：' + String(error));
         }
       });
       if (track.source === 'local') {
@@ -80,10 +126,14 @@ export class Player {
     });
   }
 
-  async toggle(): Promise<void> {
+  async resume(): Promise<void> {
+    const player = this.active;
+    if (player?.state === 'paused' || player?.state === 'completed') await player.play();
+  }
+
+  async pause(): Promise<void> {
     const player = this.active;
     if (player?.state === 'playing') await player.pause();
-    else if (player?.state === 'paused' || player?.state === 'completed') await player.play();
   }
 
   seek(position: number): void {

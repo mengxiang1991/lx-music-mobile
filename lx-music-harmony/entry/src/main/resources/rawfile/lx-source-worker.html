@@ -1,0 +1,113 @@
+<!doctype html>
+<meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline' 'unsafe-eval'; worker-src blob:; connect-src 'none'; base-uri 'none'">
+<script>
+function workerMain() {
+  let handler;
+  let initialization;
+  let finishInit;
+  let requestId = 0;
+  const waiting = new Map();
+  const events = Object.freeze({ request: 'request', inited: 'inited', updateAlert: 'updateAlert' });
+  const emit = self.postMessage.bind(self);
+  const consoleStub = Object.freeze({ log() {}, info() {}, warn() {}, error() {}, group() {}, groupEnd() {} });
+  const buffer = {
+    from(value, format) {
+      if (typeof value !== 'string') return Uint8Array.from(value);
+      if (format === 'base64') return Uint8Array.from(atob(value), char => char.charCodeAt(0));
+      if (format === 'hex') return Uint8Array.from(value.match(/.{1,2}/g) || [], hex => parseInt(hex, 16));
+      if (format === 'binary') return Uint8Array.from(value, char => char.charCodeAt(0));
+      return new TextEncoder().encode(value);
+    },
+    bufToString(bytes, format) {
+      if (format === 'hex') return Array.from(bytes, byte => byte.toString(16).padStart(2, '0')).join('');
+      if (format === 'base64' || format === 'binary') {
+        const binary = Array.from(bytes, byte => String.fromCharCode(byte)).join('');
+        return format === 'base64' ? btoa(binary) : binary;
+      }
+      return new TextDecoder().decode(bytes);
+    }
+  };
+  async function compress(value, inflate) {
+    const stream = inflate ? new DecompressionStream('deflate') : new CompressionStream('deflate');
+    const bytes = typeof value === 'string' ? buffer.from(value) : value;
+    const response = new Response(new Blob([bytes]).stream().pipeThrough(stream));
+    return new Uint8Array(await response.arrayBuffer());
+  }
+  self.lx = Object.freeze({
+    EVENT_NAMES: events,
+    env: 'mobile',
+    version: '2.0.0',
+    on(name, callback) {
+      if (name === events.request && typeof callback === 'function') handler = callback;
+      return Promise.resolve();
+    },
+    send(name, value) {
+      if (name === events.inited && finishInit) finishInit(value);
+      return Promise.resolve();
+    },
+    request(url, options, callback) {
+      const id = ++requestId;
+      waiting.set(id, callback);
+      emit({ kind: 'request', id, url: String(url), options: options || {} });
+      return () => waiting.delete(id);
+    },
+    utils: { buffer, crypto: { randomBytes: size => crypto.getRandomValues(new Uint8Array(size)) },
+      zlib: { inflate: value => compress(value, true), deflate: value => compress(value, false) } }
+  });
+  self.onmessage = async event => {
+    const data = event.data;
+    if (data.kind === 'response') {
+      const callback = waiting.get(data.id);
+      waiting.delete(data.id);
+      if (!callback) return;
+      if (data.error) callback(new Error(data.error), null, null);
+      else {
+        let body = data.body;
+        try { body = JSON.parse(body); } catch {}
+        callback(null, { statusCode: data.status, body, headers: data.headers || {}, raw: buffer.from(data.body) }, body);
+      }
+      return;
+    }
+    try {
+      initialization = new Promise(resolve => { finishInit = resolve; });
+      self.window = self;
+      self.console = consoleStub;
+      new Function(data.code)();
+      const settings = await initialization;
+      const entry = settings?.sources?.[data.source];
+      if (!handler || !entry || !entry.actions?.includes('musicUrl')) throw new Error('Unsupported source');
+      const qualities = entry.qualitys || [];
+      const type = qualities.includes('128k') ? '128k' : qualities.find(key => typeof key === 'string');
+      if (!type) throw new Error('Unsupported quality');
+      const url = await handler({ source: data.source, action: 'musicUrl',
+        info: { type, musicInfo: data.track } });
+      emit({ kind: 'result', url: typeof url === 'string' ? url : '' });
+    } catch {
+      emit({ kind: 'result', url: '' });
+    }
+  };
+}
+const jobs = new Map();
+window.lxStart = (id, input) => {
+  const url = URL.createObjectURL(new Blob(['(' + workerMain.toString() + ')()'], { type: 'text/javascript' }));
+  const worker = new Worker(url);
+  const queue = [];
+  jobs.set(id, { worker, queue, url });
+  worker.onmessage = ({ data }) => {
+    if (queue.length < 24 && (data?.kind === 'request' || data?.kind === 'result')) queue.push(data);
+  };
+  worker.onerror = () => queue.push({ kind: 'result', url: '' });
+  worker.postMessage(input);
+  return true;
+};
+window.lxPoll = id => JSON.stringify(jobs.get(id)?.queue.splice(0, 24) || []);
+window.lxReply = (id, response) => jobs.get(id)?.worker.postMessage({ kind: 'response', ...response });
+window.lxStop = id => {
+  const job = jobs.get(id);
+  if (!job) return;
+  job.worker.terminate();
+  URL.revokeObjectURL(job.url);
+  jobs.delete(id);
+};
+</script>

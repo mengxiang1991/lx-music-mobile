@@ -105,3 +105,106 @@ export function timeLabel(ms: number): string {
   const seconds = Math.floor(Math.max(0, ms) / 1000);
   return String(Math.floor(seconds / 60)).padStart(2, '0') + ':' + String(seconds % 60).padStart(2, '0');
 }
+
+interface ChartRow { id?: string | number; name?: string; artist?: string }
+interface ChartResponse { musiclist?: ChartRow[] }
+
+export function parseChart(raw: string): Track[] {
+  const data = JSON.parse(raw) as ChartResponse;
+  if (!Array.isArray(data?.musiclist)) throw new Error('榜单数据无效');
+  const songs: Track[] = [];
+  const seen = new Set<string>();
+  for (const item of data.musiclist) {
+    if (!item || typeof item.name !== 'string' || !item.name.trim() ||
+      (typeof item.id !== 'string' && typeof item.id !== 'number')) continue;
+    const id = String(item.id).replace(/^MUSIC_/, '');
+    if (!id || seen.has(id)) continue;
+    seen.add(id);
+    songs.push(new Track('kw:' + id, cleanLabel(item.name),
+      typeof item.artist === 'string' ? cleanLabel(item.artist).replace(/&/g, ' / ') : '', 'kw', id));
+  }
+  return songs;
+}
+
+interface ChartArtist { name?: string }
+interface NeteaseChartSong { id?: number; name?: string; artists?: ChartArtist[] }
+interface NeteaseChartResponse { result?: NeteaseChartResult }
+interface NeteaseChartResult { tracks?: NeteaseChartSong[]; songs?: NeteaseChartSong[] }
+interface QqChartSong { songmid?: string; songname?: string; singer?: ChartArtist[] }
+interface QqChartEntry { data?: QqChartSong }
+interface QqChartResponse { songlist?: QqChartEntry[] }
+interface SodaChartSong { id?: string; name?: string; artists?: ChartArtist[] }
+interface SodaChartEntry { track?: SodaChartSong }
+interface SodaChartResult { track_ranks?: SodaChartEntry[] }
+interface SodaChartResponse { chart?: SodaChartResult }
+interface SodaPlaylistEntity { track_wrapper?: SodaChartEntry }
+interface SodaPlaylistItem { entity?: SodaPlaylistEntity }
+interface SodaPlaylistResponse { media_resources?: SodaPlaylistItem[] }
+
+function chartArtistNames(artists?: ChartArtist[]): string {
+  return Array.isArray(artists) ? artists.filter(artist => typeof artist?.name === 'string')
+    .map(artist => cleanLabel(artist.name ?? '')).filter(name => name).join(' / ') : '';
+}
+
+export function parseNeteaseChart(raw: string): Track[] {
+  const data = JSON.parse(raw) as NeteaseChartResponse;
+  return neteaseTracks(data?.result?.tracks);
+}
+
+export function parseNeteaseSearch(raw: string): Track[] {
+  const data = JSON.parse(raw) as NeteaseChartResponse;
+  return neteaseTracks(data?.result?.songs ?? []);
+}
+
+function neteaseTracks(rows: NeteaseChartSong[] | undefined): Track[] {
+  if (!Array.isArray(rows)) throw new Error('网易云榜单数据无效');
+  const songs: Track[] = [];
+  for (const item of rows) {
+    if (typeof item?.name !== 'string' || !item.name.trim() ||
+      typeof item.id !== 'number' || !Number.isSafeInteger(item.id) || item.id <= 0) continue;
+    const id = String(item.id);
+    if (songs.some(song => song.songId === id)) continue;
+    songs.push(new Track('wy:' + id, cleanLabel(item.name), chartArtistNames(item.artists), 'wy', id));
+    if (songs.length === 30) break;
+  }
+  return songs;
+}
+
+export function parseQqChart(raw: string): Track[] {
+  const data = JSON.parse(raw) as QqChartResponse;
+  if (!Array.isArray(data?.songlist)) throw new Error('QQ 音乐榜单数据无效');
+  const songs: Track[] = [];
+  for (const entry of data.songlist) {
+    const item = entry?.data;
+    if (typeof item?.songname !== 'string' || !item.songname.trim() ||
+      typeof item.songmid !== 'string' || !item.songmid || songs.some(song => song.songId === item.songmid)) continue;
+    songs.push(new Track('tx:' + item.songmid, cleanLabel(item.songname), chartArtistNames(item.singer), 'tx', item.songmid));
+    if (songs.length === 30) break;
+  }
+  return songs;
+}
+
+export function parseSodaChart(raw: string): Track[] {
+  const data = JSON.parse(raw) as SodaChartResponse;
+  const rows = data?.chart?.track_ranks;
+  if (!Array.isArray(rows)) throw new Error('汽水音乐榜单数据无效');
+  return sodaTracks(rows.map(entry => entry?.track));
+}
+
+export function parseSodaClassics(raw: string): Track[] {
+  const data = JSON.parse(raw) as SodaPlaylistResponse;
+  const rows = data?.media_resources;
+  if (!Array.isArray(rows)) throw new Error('汽水音乐歌单数据无效');
+  return sodaTracks(rows.map(entry => entry?.entity?.track_wrapper?.track));
+}
+
+function sodaTracks(rows: (SodaChartSong | undefined)[]): Track[] {
+  const songs: Track[] = [];
+  for (const item of rows) {
+    if (typeof item?.name !== 'string' || !item.name.trim() ||
+      typeof item.id !== 'string' || !item.id || songs.some(song => song.songId === item.id)) continue;
+    songs.push(new Track('sd:' + item.id, cleanLabel(item.name), chartArtistNames(item.artists), 'sd', item.id));
+    if (songs.length === 30) break;
+  }
+  return songs;
+}

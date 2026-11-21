@@ -2,14 +2,28 @@ import { common } from '@kit.AbilityKit';
 import { fileIo as fs, picker, fileUri } from '@kit.CoreFileKit';
 import { util } from '@kit.ArkTS';
 import { zlib } from '@kit.BasicServicesKit';
-import { Playlist, Track, parseBackup } from './Tracks';
+import { Playlist, Track } from './Tracks';
 
 const MAX_BACKUP_BYTES = 16 * 1024 * 1024;
+
+export class ResolverProfile {
+  id: string;
+  name: string;
+  address: string;
+
+  constructor(id: string, name: string, address: string) {
+    this.id = id;
+    this.name = name;
+    this.address = address;
+  }
+}
 
 export class LibraryData {
   favorites: Track[] = [];
   playlists: Playlist[] = [];
   resolver: string = '';
+  resolvers: ResolverProfile[] = [];
+  preferScriptSources: boolean = false;
 }
 
 export class Library {
@@ -21,7 +35,14 @@ export class Library {
     this.audioDir = context.filesDir + '/audio';
     if (!fs.accessSync(this.audioDir)) fs.mkdirSync(this.audioDir);
     if (!fs.accessSync(this.file)) return new LibraryData();
-    return JSON.parse(fs.readTextSync(this.file, { encoding: 'utf-8' })) as LibraryData;
+    const data = JSON.parse(fs.readTextSync(this.file, { encoding: 'utf-8' })) as LibraryData;
+    data.resolver = data.resolver ?? '';
+    data.preferScriptSources = data.preferScriptSources ?? false;
+    data.resolvers = data.resolvers ?? [];
+    if (data.resolver && !data.resolvers.some(profile => profile.address === data.resolver)) {
+      data.resolvers.push(new ResolverProfile('legacy', '原有音源', data.resolver));
+    }
+    return data;
   }
 
   save(data: LibraryData): void {
@@ -73,13 +94,13 @@ export class Library {
     }
   }
 
-  async pickBackup(context: common.UIAbilityContext): Promise<Playlist[]> {
+  async pickBackup(context: common.UIAbilityContext): Promise<string | undefined> {
     const selector = new picker.DocumentViewPicker(context);
     const options = new picker.DocumentSelectOptions();
     options.maxSelectNumber = 1;
     options.fileSuffixFilters = ['洛雪歌单|.lxmc,.json'];
     const files = await selector.select(options);
-    if (!files.length) return [];
+    if (!files.length) return undefined;
     const file = await fs.open(files[0], fs.OpenMode.READ_ONLY);
     let bytes: ArrayBuffer;
     try {
@@ -93,9 +114,24 @@ export class Library {
     }
     const header = new Uint8Array(bytes);
     if (header[0] === 31 && header[1] === 139) bytes = await this.gunzip(bytes);
-    const result = parseBackup(util.TextDecoder.create('utf-8').decodeToString(new Uint8Array(bytes)));
-    if (result.length === 0) throw new Error('歌单文件内容无效');
-    return result;
+    return util.TextDecoder.create('utf-8').decodeToString(new Uint8Array(bytes));
+  }
+
+  async exportBackup(context: common.UIAbilityContext, body: string): Promise<boolean> {
+    const bytes = util.TextEncoder.create('utf-8').encodeInto(body);
+    if (bytes.byteLength > MAX_BACKUP_BYTES) throw new Error('备份超过 16 MB');
+    const options = new picker.DocumentSaveOptions();
+    options.newFileNames = ['lx-harmony-library.json'];
+    const files = await new picker.DocumentViewPicker(context).save(options);
+    if (!files.length) return false;
+    const file = await fs.open(files[0], fs.OpenMode.WRITE_ONLY | fs.OpenMode.TRUNC);
+    try {
+      const written = await fs.write(file.fd, body);
+      if (written !== bytes.byteLength) throw new Error('文件写入不完整');
+    } finally {
+      await fs.close(file);
+    }
+    return true;
   }
 
   private async gunzip(bytes: ArrayBuffer): Promise<ArrayBuffer> {
